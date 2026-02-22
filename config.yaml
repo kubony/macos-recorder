@@ -1,0 +1,20 @@
+# macOS Recorder Configuration
+
+recording:
+  fps: 30
+  quality: high  # low, medium, high
+  include_cursor: true
+
+audio:
+  system_audio: true
+  microphone: true
+  sample_rate: 44100
+
+bluetooth:
+  enabled: true
+  scan_interval: 1.0  # seconds
+  target_devices: []  # empty = all devices, or list specific device names
+
+output:
+  directory: ~/Recordings
+  format: mp4

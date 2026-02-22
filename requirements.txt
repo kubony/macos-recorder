@@ -1,0 +1,24 @@
+# Menu bar app
+rumps>=0.4.0
+
+# Audio recording
+sounddevice>=0.4.6
+soundfile>=0.12.1
+numpy>=1.24.0
+
+# Screen recording
+mss>=9.0.1
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# Bluetooth
+bleak>=0.21.0
+
+# Video encoding
+av>=10.0.0
+
+# Configuration
+PyYAML>=6.0
+
+# Utilities
+click>=8.1.0
