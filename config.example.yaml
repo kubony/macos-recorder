@@ -1,0 +1,25 @@
+# config.example.yaml - Copy to config.yaml and customize
+# macOS Recorder Configuration
+
+recording:
+  fps: 30              # Frame rate (10-60)
+  quality: high        # low, medium, high
+  include_cursor: true # Include mouse cursor in recording
+
+audio:
+  system_audio: true   # Record system audio (requires BlackHole)
+  microphone: true     # Record from microphone
+  sample_rate: 44100   # Audio sample rate in Hz
+
+bluetooth:
+  enabled: true        # Monitor Bluetooth RSSI
+  scan_interval: 1.0   # Seconds between scans
+  anonymize: true      # Hash device names for privacy
+
+output:
+  directory: ~/Recordings  # Where to save recordings
+  format: mp4              # Video format
+
+privacy:
+  auto_delete_days: 30     # Auto-delete old recordings (0 = disabled)
+  require_consent: false   # Show consent dialog on first run

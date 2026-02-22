@@ -128,6 +128,9 @@ class SleepInhibitor:
 class ScreenRecorder:
     """Records screen using ffmpeg with avfoundation."""
     
+    # Class-level ffmpeg availability cache
+    _ffmpeg_available = None
+    
     def __init__(self, output_path: Path, fps: int = 30, monitor_idx: int = 1):
         self.output_path = output_path
         self.fps = fps
@@ -136,17 +139,21 @@ class ScreenRecorder:
         self.recording = False
         self._error = None
     
+    @classmethod
+    def check_ffmpeg(cls) -> bool:
+        """Check ffmpeg availability (cached)."""
+        if cls._ffmpeg_available is None:
+            try:
+                subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
+                cls._ffmpeg_available = True
+            except:
+                cls._ffmpeg_available = False
+        return cls._ffmpeg_available
+    
     def start(self) -> bool:
         """Start screen recording."""
-        # Check ffmpeg availability
-        try:
-            subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True)
-        except FileNotFoundError:
+        if not self.check_ffmpeg():
             self._error = "ffmpeg not found. Install: brew install ffmpeg"
-            logger.error(self._error)
-            return False
-        except subprocess.CalledProcessError as e:
-            self._error = f"ffmpeg error: {e}"
             logger.error(self._error)
             return False
         
@@ -169,8 +176,8 @@ class ScreenRecorder:
             self.process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stdout=subprocess.DEVNULL,  # P0 fix: prevent buffer accumulation
+                stderr=subprocess.DEVNULL   # P0 fix: prevent buffer accumulation
             )
             logger.info(f"Screen recording started: {self.output_path}")
             return True
@@ -181,26 +188,45 @@ class ScreenRecorder:
             return False
     
     def stop(self):
-        """Stop screen recording."""
+        """Stop screen recording with robust process cleanup."""
         self.recording = False
-        if self.process:
+        if not self.process:
+            return
+        
+        # P0 fix: robust multi-stage process termination
+        try:
+            self.process.stdin.write(b'q')
+            self.process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        
+        # Stage 1: graceful wait
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            # Stage 2: terminate
+            self.process.terminate()
             try:
-                self.process.stdin.write(b'q')
-                self.process.stdin.flush()
-                self.process.wait(timeout=10)
-            except:
-                self.process.terminate()
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Stage 3: kill
+                self.process.kill()
                 try:
-                    self.process.wait(timeout=5)
-                except:
-                    self.process.kill()
-            
-            # Set secure file permissions
-            if self.output_path.exists():
-                os.chmod(self.output_path, 0o600)
-            
-            self.process = None
-            logger.info("Screen recording stopped")
+                    self.process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    # Stage 4: force kill via OS
+                    try:
+                        subprocess.run(["kill", "-9", str(self.process.pid)], 
+                                       capture_output=True, timeout=2)
+                    except:
+                        pass
+        
+        # Set secure file permissions
+        if self.output_path.exists():
+            os.chmod(self.output_path, 0o600)
+        
+        self.process = None
+        logger.info("Screen recording stopped")
     
     def get_error(self) -> Optional[str]:
         return self._error
@@ -213,9 +239,20 @@ class AudioRecorder:
         self.output_path = output_path
         self.source = source
         self.sample_rate = sample_rate
-        self.recording = False
+        self._recording = False
+        self._recording_lock = threading.Lock()  # P0 fix: thread safety
         self.thread = None
         self._error = None
+    
+    @property
+    def recording(self) -> bool:
+        with self._recording_lock:
+            return self._recording
+    
+    @recording.setter
+    def recording(self, value: bool):
+        with self._recording_lock:
+            self._recording = value
     
     def start(self) -> bool:
         """Start audio recording in a background thread."""
@@ -372,13 +409,20 @@ class BluetoothMonitor:
             logger.error(self._error)
     
     def stop(self):
-        """Stop Bluetooth monitoring."""
+        """Stop Bluetooth monitoring with proper resource cleanup."""
         self.running = False
         if self.loop:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.thread:
             self.thread.join(timeout=5)
             self.thread = None
+        # P0 fix: properly close asyncio event loop to prevent resource leak
+        if self.loop:
+            try:
+                self.loop.close()
+            except:
+                pass
+            self.loop = None
         logger.info("Bluetooth monitoring stopped")
     
     def get_error(self) -> Optional[str]:

@@ -10,6 +10,7 @@ Improvements based on expert review:
 - Status feedback (icon animation, sounds, duration)
 - Consent mechanism
 - Secure file handling
+- P0 fixes: thread safety, event buffering, crash recovery, size update optimization
 """
 
 import rumps
@@ -18,6 +19,8 @@ import time
 import os
 import json
 import subprocess
+import signal
+import atexit
 from datetime import datetime
 from pathlib import Path
 
@@ -25,6 +28,10 @@ from recorder import (
     ScreenRecorder, AudioRecorder, BluetoothMonitor, SleepInhibitor,
     PermissionChecker, load_config, secure_directory, secure_file, play_sound
 )
+
+
+# P0 fix: State file for crash recovery
+STATE_FILE = Path.home() / ".macos-recorder" / "state.json"
 
 
 class ConsentManager:
@@ -84,14 +91,88 @@ class RecorderApp(rumps.App):
             quit_button=None
         )
         
-        self.recording = False
+        # P0 fix: thread-safe recording flag
+        self._recording = False
+        self._recording_lock = threading.Lock()
         self.start_time = None
+        
+        # P0 fix: event buffering
+        self._event_buffer = []
+        self._event_buffer_lock = threading.Lock()
+        self._last_size_update = 0  # P0 fix: throttle size updates
+        self._cached_size = 0
         
         # Load config
         self.config = load_config()
         self.output_dir = Path(self.config["output"]["directory"]).expanduser()
         self.output_dir.mkdir(exist_ok=True)
         secure_directory(self.output_dir)
+        
+        # P0 fix: recover from previous crash
+        self._recover_from_crash()
+        
+        # P0 fix: register cleanup handlers
+        atexit.register(self._cleanup_on_exit)
+        signal.signal(signal.SIGTERM, self._handle_signal)
+        signal.signal(signal.SIGINT, self._handle_signal)
+    
+    @property
+    def recording(self) -> bool:
+        with self._recording_lock:
+            return self._recording
+    
+    @recording.setter
+    def recording(self, value: bool):
+        with self._recording_lock:
+            self._recording = value
+    
+    def _recover_from_crash(self):
+        """Check for incomplete recording from previous crash."""
+        if STATE_FILE.exists():
+            try:
+                state = json.loads(STATE_FILE.read_text())
+                if state.get("recording") and state.get("session_dir"):
+                    session_dir = Path(state["session_dir"])
+                    if session_dir.exists():
+                        # Mark as incomplete
+                        incomplete_marker = session_dir / "INCOMPLETE"
+                        incomplete_marker.write_text(f"Crashed at: {datetime.now().isoformat()}")
+                        rumps.notification(
+                            title="macOS Recorder",
+                            subtitle="",
+                            message=f"이전 녹화가 비정상 종료됨:\n{session_dir.name}"
+                        )
+            except:
+                pass
+            finally:
+                STATE_FILE.unlink(missing_ok=True)
+    
+    def _save_state(self):
+        """Save current recording state for crash recovery."""
+        STATE_FILE.parent.mkdir(exist_ok=True)
+        state = {
+            "recording": self.recording,
+            "session_dir": str(self.session_dir) if self.session_dir else None,
+            "start_time": self.start_time,
+            "pid": os.getpid()
+        }
+        STATE_FILE.write_text(json.dumps(state))
+    
+    def _clear_state(self):
+        """Clear state file after normal stop."""
+        STATE_FILE.unlink(missing_ok=True)
+    
+    def _handle_signal(self, signum, frame):
+        """Handle shutdown signals gracefully."""
+        if self.recording:
+            self.stop_recording()
+        rumps.quit_application()
+    
+    def _cleanup_on_exit(self):
+        """Cleanup on normal exit."""
+        if self.recording:
+            self.stop_recording()
+        self._clear_state()
         
         # Recording settings (toggleable)
         self.settings = {
@@ -306,6 +387,9 @@ class RecorderApp(rumps.App):
             "options": {k: v for k, v in self.settings.items()}
         })
         
+        # P0 fix: Save state for crash recovery
+        self._save_state()
+        
         # Update UI
         self.start_item.title = "⏹️ Stop Recording"
         self.title = "🔴"
@@ -357,11 +441,17 @@ class RecorderApp(rumps.App):
             self.sleep_inhibitor.stop()
             self.sleep_inhibitor = None
         
+        # P0 fix: Flush remaining events before closing
+        self._flush_events()
+        
         # Close event log
         if self.event_file:
             self.event_file.close()
             secure_file(self.session_dir / "events.jsonl")
             self.event_file = None
+        
+        # P0 fix: Clear state file after normal stop
+        self._clear_state()
         
         # Play stop sound
         play_sound("Glass")
@@ -392,15 +482,36 @@ class RecorderApp(rumps.App):
         )
     
     def _log_event(self, event_type: str, data: dict):
-        """Log an event with timestamp."""
-        if self.event_file:
-            event = {
-                "ts": time.time_ns(),
-                "type": event_type,
-                **data
-            }
+        """Log an event with timestamp (buffered for performance)."""
+        event = {
+            "ts": time.time_ns(),
+            "type": event_type,
+            **data
+        }
+        
+        with self._event_buffer_lock:
+            self._event_buffer.append(event)
+            # P0 fix: flush every 100 events or on important events
+            should_flush = (
+                len(self._event_buffer) >= 100 or 
+                event_type == "recording"  # Always flush start/stop
+            )
+        
+        if should_flush:
+            self._flush_events()
+    
+    def _flush_events(self):
+        """Flush buffered events to file."""
+        if not self.event_file:
+            return
+        
+        with self._event_buffer_lock:
+            events_to_write = self._event_buffer.copy()
+            self._event_buffer.clear()
+        
+        for event in events_to_write:
             self.event_file.write(json.dumps(event) + "\n")
-            self.event_file.flush()
+        self.event_file.flush()
     
     def _on_bluetooth_event(self, device_name: str, rssi: int):
         """Callback for Bluetooth RSSI updates."""
@@ -424,13 +535,20 @@ class RecorderApp(rumps.App):
             self.duration_item.title = f"Duration: {duration_str}"
             self.title = f"🔴 {mins:02d}:{secs:02d}"
             
-            # Update size
-            if self.session_dir and self.session_dir.exists():
-                total_size = sum(
-                    f.stat().st_size for f in self.session_dir.iterdir() if f.is_file()
-                )
-                size_mb = total_size / (1024 * 1024)
-                self.size_item.title = f"Size: {size_mb:.1f} MB"
+            # P0 fix: Update size only every 10 seconds to reduce I/O
+            current_time = time.time()
+            if current_time - self._last_size_update >= 10:
+                self._last_size_update = current_time
+                if self.session_dir and self.session_dir.exists():
+                    try:
+                        self._cached_size = sum(
+                            f.stat().st_size for f in self.session_dir.iterdir() if f.is_file()
+                        )
+                    except:
+                        pass
+            
+            size_mb = self._cached_size / (1024 * 1024)
+            self.size_item.title = f"Size: {size_mb:.1f} MB"
     
     def open_settings(self, sender):
         """Open config file for editing."""
