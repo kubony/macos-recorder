@@ -6,7 +6,6 @@ import subprocess
 import time
 import json
 import asyncio
-import hashlib
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -14,7 +13,6 @@ from datetime import datetime
 # Config - that's it. No YAML.
 OUTPUT_DIR = Path.home() / "Recordings"
 FPS = 30
-BT_SALT = "karpathy"  # 익명화용 salt (한 줄이면 충분)
 
 
 class Recorder(rumps.App):
@@ -151,9 +149,6 @@ class Recorder(rumps.App):
         except ImportError:
             return  # No bleak? Skip it.
         
-        def anonymize(name: str) -> str:
-            return f"Device_{hashlib.sha256((BT_SALT + (name or 'unknown')).encode()).hexdigest()[:6]}"
-        
         async def scan():
             while self.bt_running:
                 try:
@@ -161,7 +156,7 @@ class Recorder(rumps.App):
                     for d in devices:
                         if d.rssi is not None:
                             self.log_event("bluetooth", {
-                                "device": anonymize(d.name),
+                                "device": d.name or "Unknown",
                                 "rssi": d.rssi
                             })
                 except:
