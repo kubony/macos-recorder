@@ -115,6 +115,39 @@ class RecorderApp(rumps.App):
         atexit.register(self._cleanup_on_exit)
         signal.signal(signal.SIGTERM, self._handle_signal)
         signal.signal(signal.SIGINT, self._handle_signal)
+        
+        # Recording settings (toggleable)
+        self.settings = {
+            "record_screen": True,
+            "record_audio": self.config["audio"]["system_audio"],
+            "record_mic": self.config["audio"]["microphone"],
+            "record_bluetooth": self.config["bluetooth"]["enabled"],
+            "fps": self.config["recording"]["fps"],
+            "anonymize_bluetooth": self.config["bluetooth"].get("anonymize", True),
+        }
+        
+        # Recording components
+        self.screen_recorder = None
+        self.audio_recorder = None
+        self.mic_recorder = None
+        self.bluetooth_monitor = None
+        self.sleep_inhibitor = None
+        
+        # Event log
+        self.event_file = None
+        self.session_dir = None
+        
+        # Consent manager
+        self.consent_manager = ConsentManager()
+        
+        # Build menu with toggles
+        self._build_menu()
+        
+        # Timer for updating duration
+        self.duration_timer = rumps.Timer(self._update_duration, 1)
+        
+        # Check permissions and consent on startup
+        self._check_startup_requirements()
     
     @property
     def recording(self) -> bool:
@@ -173,39 +206,6 @@ class RecorderApp(rumps.App):
         if self.recording:
             self.stop_recording()
         self._clear_state()
-        
-        # Recording settings (toggleable)
-        self.settings = {
-            "record_screen": True,
-            "record_audio": self.config["audio"]["system_audio"],
-            "record_mic": self.config["audio"]["microphone"],
-            "record_bluetooth": self.config["bluetooth"]["enabled"],
-            "fps": self.config["recording"]["fps"],
-            "anonymize_bluetooth": self.config["bluetooth"].get("anonymize", True),
-        }
-        
-        # Recording components
-        self.screen_recorder = None
-        self.audio_recorder = None
-        self.mic_recorder = None
-        self.bluetooth_monitor = None
-        self.sleep_inhibitor = None
-        
-        # Event log
-        self.event_file = None
-        self.session_dir = None
-        
-        # Consent manager
-        self.consent_manager = ConsentManager()
-        
-        # Build menu with toggles
-        self._build_menu()
-        
-        # Timer for updating duration
-        self.duration_timer = rumps.Timer(self._update_duration, 1)
-        
-        # Check permissions and consent on startup
-        self._check_startup_requirements()
     
     def _build_menu(self):
         """Build the menu with toggle options."""
