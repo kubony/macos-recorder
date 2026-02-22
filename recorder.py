@@ -380,20 +380,30 @@ class AudioRecorder:
 class BluetoothAnonymizer:
     """Anonymizes Bluetooth device names for privacy."""
     
+    MAX_DEVICES = 5000  # P1 fix (Memory): LRU cache limit
+    
     def __init__(self, salt: str = None):
+        from collections import OrderedDict
         self.salt = salt or os.urandom(16).hex()
-        self.device_map = {}
+        self.device_map = OrderedDict()
     
     def anonymize(self, device_name: str) -> str:
-        """Anonymize device name with consistent hash."""
+        """Anonymize device name with consistent hash (LRU cached)."""
         if not device_name:
             return "Unknown"
         
-        if device_name not in self.device_map:
-            hash_value = hashlib.sha256(
-                (self.salt + device_name).encode()
-            ).hexdigest()[:6]
-            self.device_map[device_name] = f"Device_{hash_value}"
+        if device_name in self.device_map:
+            self.device_map.move_to_end(device_name)  # LRU update
+            return self.device_map[device_name]
+        
+        # P1 fix: LRU eviction when cache is full
+        while len(self.device_map) >= self.MAX_DEVICES:
+            self.device_map.popitem(last=False)
+        
+        hash_value = hashlib.sha256(
+            (self.salt + device_name).encode()
+        ).hexdigest()[:6]
+        self.device_map[device_name] = f"Device_{hash_value}"
         
         return self.device_map[device_name]
 

@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 # P0 fix: State file for crash recovery
 STATE_FILE = Path.home() / ".macos-recorder" / "state.json"
 
+# P1 fix (Memory): Event buffer limits
+MAX_EVENT_BUFFER = 10000
+
 
 class ConsentManager:
     """Manages user consent for data collection (GDPR compliance)."""
@@ -528,11 +531,17 @@ class RecorderApp(rumps.App):
         self.mic_toggle.set_callback(self._toggle_mic)
         self.bt_toggle.set_callback(self._toggle_bluetooth)
         
+        session_name = self.session_dir.name if self.session_dir else "unknown"
         rumps.notification(
             title="⏹️ 녹화 완료",
             subtitle="",
-            message=f"{self.session_dir.name}\n크기: {size_mb:.1f} MB"
+            message=f"{session_name}\n크기: {size_mb:.1f} MB"
         )
+        
+        # P2 fix (Memory): clear session references
+        self.session_dir = None
+        self.start_time = None
+        self._reference_time = None
     
     def _log_event(self, event_type: str, data: dict):
         """Log an event with timestamp (buffered for performance)."""
@@ -544,6 +553,13 @@ class RecorderApp(rumps.App):
         }
         
         with self._event_buffer_lock:
+            # P1 fix (Memory): enforce buffer limit to prevent OOM
+            if len(self._event_buffer) >= MAX_EVENT_BUFFER:
+                # Keep recording events, drop oldest regular events
+                important = [e for e in self._event_buffer if e.get('type') == 'recording']
+                self._event_buffer = important[-100:] + self._event_buffer[-MAX_EVENT_BUFFER//2:]
+                logger.warning(f"Event buffer overflow, dropped old events")
+            
             self._event_buffer.append(event)
             # P0 fix: flush every 100 events, on important events, OR every 1 second
             should_flush = (
