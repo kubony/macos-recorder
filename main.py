@@ -21,6 +21,7 @@ import json
 import subprocess
 import signal
 import atexit
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,9 @@ from recorder import (
     ScreenRecorder, AudioRecorder, BluetoothMonitor, SleepInhibitor,
     PermissionChecker, load_config, secure_directory, secure_file, play_sound
 )
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 
 # P0 fix: State file for crash recovery
@@ -253,21 +257,43 @@ class RecorderApp(rumps.App):
         if not self.recording:
             self.settings["record_screen"] = not self.settings["record_screen"]
             sender.state = self.settings["record_screen"]
+            self._persist_settings()
     
     def _toggle_audio(self, sender):
         if not self.recording:
             self.settings["record_audio"] = not self.settings["record_audio"]
             sender.state = self.settings["record_audio"]
+            self._persist_settings()
     
     def _toggle_mic(self, sender):
         if not self.recording:
             self.settings["record_mic"] = not self.settings["record_mic"]
             sender.state = self.settings["record_mic"]
+            self._persist_settings()
     
     def _toggle_bluetooth(self, sender):
         if not self.recording:
             self.settings["record_bluetooth"] = not self.settings["record_bluetooth"]
             sender.state = self.settings["record_bluetooth"]
+            self._persist_settings()
+    
+    def _persist_settings(self):
+        """P0 fix (Config): Save UI settings to config file."""
+        try:
+            import yaml
+            config_path = Path(__file__).parent / "config.yaml"
+            
+            # Update config with current settings
+            self.config["audio"]["system_audio"] = self.settings["record_audio"]
+            self.config["audio"]["microphone"] = self.settings["record_mic"]
+            self.config["bluetooth"]["enabled"] = self.settings["record_bluetooth"]
+            
+            with open(config_path, 'w') as f:
+                yaml.dump(self.config, f, default_flow_style=False, allow_unicode=True)
+            
+            logger.info("Settings persisted to config.yaml")
+        except Exception as e:
+            logger.warning(f"Failed to persist settings: {e}")
     
     def _check_startup_requirements(self):
         """Check permissions and consent on startup."""
@@ -330,11 +356,23 @@ class RecorderApp(rumps.App):
         self.recording = True
         self.start_time = time.time()
         
+        # P0 fix (Real-time): Create reference timestamp for A/V sync
+        self._reference_time = {
+            "wall_ns": time.time_ns(),
+            "monotonic_ns": time.monotonic_ns(),
+            "iso": datetime.now().isoformat()
+        }
+        
         # Create session directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_dir = self.output_dir / f"recording_{timestamp}"
         self.session_dir.mkdir(exist_ok=True)
         secure_directory(self.session_dir)
+        
+        # Write reference timestamp to session (for post-processing sync)
+        ref_file = self.session_dir / "reference_time.json"
+        ref_file.write_text(json.dumps(self._reference_time, indent=2))
+        secure_file(ref_file)
         
         # Open event log
         self.event_file = open(self.session_dir / "events.jsonl", "w")
@@ -485,23 +523,25 @@ class RecorderApp(rumps.App):
         """Log an event with timestamp (buffered for performance)."""
         event = {
             "ts": time.time_ns(),
+            "ts_monotonic": time.monotonic_ns(),  # P0 fix: add monotonic timestamp
             "type": event_type,
             **data
         }
         
         with self._event_buffer_lock:
             self._event_buffer.append(event)
-            # P0 fix: flush every 100 events or on important events
+            # P0 fix: flush every 100 events, on important events, OR every 1 second
             should_flush = (
                 len(self._event_buffer) >= 100 or 
-                event_type == "recording"  # Always flush start/stop
+                event_type == "recording" or  # Always flush start/stop
+                (time.monotonic() - getattr(self, '_last_flush_time', 0)) >= 1.0
             )
         
         if should_flush:
             self._flush_events()
     
     def _flush_events(self):
-        """Flush buffered events to file."""
+        """Flush buffered events to file with error recovery."""
         if not self.event_file:
             return
         
@@ -509,9 +549,25 @@ class RecorderApp(rumps.App):
             events_to_write = self._event_buffer.copy()
             self._event_buffer.clear()
         
+        # P0 fix: exception handling for file I/O
+        failed_events = []
         for event in events_to_write:
-            self.event_file.write(json.dumps(event) + "\n")
-        self.event_file.flush()
+            try:
+                self.event_file.write(json.dumps(event) + "\n")
+            except (IOError, OSError) as e:
+                logger.error(f"Failed to write event: {e}")
+                failed_events.append(event)
+        
+        try:
+            self.event_file.flush()
+            self._last_flush_time = time.monotonic()
+        except (IOError, OSError) as e:
+            logger.error(f"Failed to flush events: {e}")
+        
+        # Re-add failed events to buffer for retry
+        if failed_events:
+            with self._event_buffer_lock:
+                self._event_buffer.extend(failed_events)
     
     def _on_bluetooth_event(self, device_name: str, rssi: int):
         """Callback for Bluetooth RSSI updates."""

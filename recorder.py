@@ -32,19 +32,33 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def get_macos_version() -> tuple:
+    """Get macOS version as tuple (major, minor)."""
+    import platform
+    try:
+        return tuple(map(int, platform.mac_ver()[0].split('.')[:2]))
+    except:
+        return (10, 15)  # Assume Catalina as minimum
+
+
 class PermissionChecker:
     """macOS 권한 상태 확인"""
     
     @staticmethod
     def check_screen_recording() -> bool:
-        """화면 녹화 권한 확인"""
+        """화면 녹화 권한 확인 (macOS 10.15+)"""
         try:
+            version = get_macos_version()
+            if version < (10, 15):
+                return True  # 10.15 이전은 권한 시스템 없음
+            
             from Quartz import CGPreflightScreenCaptureAccess
             return CGPreflightScreenCaptureAccess()
         except ImportError:
-            # pyobjc 없으면 True 가정 (런타임에서 실패 처리)
-            return True
-        except:
+            logger.warning("pyobjc-framework-Quartz 설치 필요")
+            return False  # False가 더 안전
+        except Exception as e:
+            logger.error(f"권한 확인 실패: {e}")
             return False
     
     @staticmethod
@@ -79,42 +93,74 @@ class PermissionChecker:
         subprocess.run(["open", urls.get(pane, urls["screen"])])
     
     @staticmethod
+    def check_bluetooth() -> bool:
+        """Bluetooth 권한 확인 (macOS 10.15+)"""
+        try:
+            version = get_macos_version()
+            if version < (10, 15):
+                return True
+            # Note: Full CoreBluetooth check requires async delegate
+            # For now, assume True and handle runtime errors
+            return True
+        except:
+            return True
+    
+    @staticmethod
     def validate_all() -> dict:
         """모든 권한 상태 확인"""
         return {
             "screen_recording": PermissionChecker.check_screen_recording(),
             "microphone": PermissionChecker.check_microphone(),
-            "bluetooth": True,  # BLE는 별도 권한 불필요
+            "bluetooth": PermissionChecker.check_bluetooth(),
         }
 
 
 class SleepInhibitor:
-    """Prevents macOS from sleeping during recording using IOKit."""
+    """Prevents macOS from sleeping and App Nap during recording."""
     
     def __init__(self, reason: str = "Recording in progress"):
         self.reason = reason
         self.assertion_id = None
         self._process = None  # Fallback to caffeinate
+        self._activity = None  # App Nap prevention
     
     def start(self):
-        """Start preventing sleep."""
+        """Start preventing sleep and App Nap."""
+        # 1. Prevent App Nap (P0 fix from macOS Native reviewer)
         try:
-            # Try IOKit first (more efficient)
-            IOKit = cdll.LoadLibrary("/System/Library/Frameworks/IOKit.framework/IOKit")
-            self.assertion_id = c_uint32(0)
-            # IOPMAssertionCreateWithName is complex, fallback to caffeinate
-            raise NotImplementedError("Using caffeinate fallback")
-        except:
-            # Fallback to caffeinate subprocess
+            from Foundation import NSProcessInfo
+            # NSActivityUserInitiatedAllowingIdleSystemSleep = 0x00FFFFFF
+            self._activity = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+                0x00FFFFFF, self.reason
+            )
+            logger.info("App Nap prevention started")
+        except Exception as e:
+            logger.warning(f"App Nap prevention failed: {e}")
+        
+        # 2. Prevent system sleep via caffeinate
+        try:
             self._process = subprocess.Popen(
                 ["caffeinate", "-dims"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
             logger.info("Sleep prevention started (caffeinate)")
+        except Exception as e:
+            logger.warning(f"caffeinate failed: {e}")
     
     def stop(self):
-        """Allow sleep again."""
+        """Allow sleep and App Nap again."""
+        # Stop App Nap prevention
+        if self._activity:
+            try:
+                from Foundation import NSProcessInfo
+                NSProcessInfo.processInfo().endActivity_(self._activity)
+                logger.info("App Nap prevention stopped")
+            except:
+                pass
+            self._activity = None
+        
+        # Stop caffeinate
         if self._process:
             self._process.terminate()
             try:
