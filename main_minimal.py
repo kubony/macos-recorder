@@ -5,6 +5,8 @@ import rumps
 import subprocess
 import time
 import json
+import asyncio
+import hashlib
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -12,6 +14,7 @@ from datetime import datetime
 # Config - that's it. No YAML.
 OUTPUT_DIR = Path.home() / "Recordings"
 FPS = 30
+BT_SALT = "karpathy"  # 익명화용 salt (한 줄이면 충분)
 
 
 class Recorder(rumps.App):
@@ -22,6 +25,8 @@ class Recorder(rumps.App):
         self.session_dir = None
         self.start_time = None
         self.event_file = None
+        self.bt_thread = None
+        self.bt_running = False
         
         self.menu = [
             rumps.MenuItem("▶️ 녹화 시작", callback=self.toggle, key="r"),
@@ -71,6 +76,11 @@ class Recorder(rumps.App):
         self.event_file = open(self.session_dir / "events.jsonl", "w")
         self.log_event("recording", {"action": "start"})
         
+        # Bluetooth monitoring
+        self.bt_running = True
+        self.bt_thread = threading.Thread(target=self._bt_monitor, daemon=True)
+        self.bt_thread.start()
+        
         self.recording = True
         self.start_time = time.time()
         self.menu["▶️ 녹화 시작"].title = "⏹️ 녹화 중지"
@@ -81,6 +91,7 @@ class Recorder(rumps.App):
     
     def stop(self):
         self.timer.stop()
+        self.bt_running = False
         self.log_event("recording", {"action": "stop", "duration": time.time() - self.start_time})
         
         # Stop all processes
@@ -132,6 +143,37 @@ class Recorder(rumps.App):
         if self.recording:
             self.stop()
         rumps.quit_application()
+    
+    def _bt_monitor(self):
+        """Bluetooth RSSI monitoring - minimal version."""
+        try:
+            from bleak import BleakScanner
+        except ImportError:
+            return  # No bleak? Skip it.
+        
+        def anonymize(name: str) -> str:
+            return f"Device_{hashlib.sha256((BT_SALT + (name or 'unknown')).encode()).hexdigest()[:6]}"
+        
+        async def scan():
+            while self.bt_running:
+                try:
+                    devices = await BleakScanner.discover(timeout=1.0)
+                    for d in devices:
+                        if d.rssi is not None:
+                            self.log_event("bluetooth", {
+                                "device": anonymize(d.name),
+                                "rssi": d.rssi
+                            })
+                except:
+                    pass
+                await asyncio.sleep(1.0)
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(scan())
+        finally:
+            loop.close()
 
 
 if __name__ == "__main__":
