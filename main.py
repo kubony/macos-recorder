@@ -54,7 +54,8 @@ class ConsentManager:
         try:
             data = json.loads(self.CONSENT_FILE.read_text())
             return data.get("granted", False) and data.get("version") == self.CONSENT_VERSION
-        except:
+        except (json.JSONDecodeError, KeyError, IOError) as e:
+            logger.warning(f"Consent file error: {e}")
             return False
     
     def request_consent(self) -> bool:
@@ -193,7 +194,10 @@ class RecorderApp(rumps.App):
             "start_time": self.start_time,
             "pid": os.getpid()
         }
-        STATE_FILE.write_text(json.dumps(state))
+        # P0 fix (Data Integrity): atomic write via temp file + rename
+        temp_file = STATE_FILE.with_suffix('.tmp')
+        temp_file.write_text(json.dumps(state))
+        temp_file.replace(STATE_FILE)  # Atomic on POSIX
     
     def _clear_state(self):
         """Clear state file after normal stop."""
@@ -488,6 +492,17 @@ class RecorderApp(rumps.App):
             secure_file(self.session_dir / "events.jsonl")
             self.event_file = None
         
+        # P1 fix (Data Integrity): Create completion marker
+        if self.session_dir:
+            completion_marker = self.session_dir / "COMPLETE"
+            completion_data = {
+                "completed_at": datetime.now().isoformat(),
+                "duration_seconds": int(time.time() - self.start_time) if self.start_time else 0,
+                "files": [f.name for f in self.session_dir.iterdir() if f.is_file()]
+            }
+            completion_marker.write_text(json.dumps(completion_data, indent=2))
+            secure_file(completion_marker)
+        
         # P0 fix: Clear state file after normal stop
         self._clear_state()
         
@@ -545,11 +560,13 @@ class RecorderApp(rumps.App):
         if not self.event_file:
             return
         
+        # P1 fix (Concurrency): update _last_flush_time inside lock
         with self._event_buffer_lock:
             events_to_write = self._event_buffer.copy()
             self._event_buffer.clear()
+            self._last_flush_time = time.monotonic()
         
-        # P0 fix: exception handling for file I/O
+        # File I/O outside lock to avoid blocking
         failed_events = []
         for event in events_to_write:
             try:
@@ -560,7 +577,6 @@ class RecorderApp(rumps.App):
         
         try:
             self.event_file.flush()
-            self._last_flush_time = time.monotonic()
         except (IOError, OSError) as e:
             logger.error(f"Failed to flush events: {e}")
         

@@ -405,11 +405,23 @@ class BluetoothMonitor:
         self.callback = callback
         self.scan_interval = scan_interval
         self.anonymize = anonymize
-        self.running = False
+        # P0 fix (Concurrency): thread-safe running flag
+        self._running = False
+        self._running_lock = threading.Lock()
         self.thread = None
         self.loop = None
         self._anonymizer = BluetoothAnonymizer() if anonymize else None
         self._error = None
+    
+    @property
+    def running(self) -> bool:
+        with self._running_lock:
+            return self._running
+    
+    @running.setter
+    def running(self, value: bool):
+        with self._running_lock:
+            self._running = value
     
     def start(self) -> bool:
         """Start Bluetooth monitoring in a background thread."""
@@ -428,15 +440,19 @@ class BluetoothMonitor:
                     try:
                         devices = await BleakScanner.discover(timeout=self.scan_interval)
                         for device in devices:
-                            name = device.name or "Unknown"
-                            rssi = device.rssi
-                            
-                            # Anonymize device name if enabled
-                            if self._anonymizer:
-                                name = self._anonymizer.anonymize(name)
-                            
-                            if rssi is not None:
-                                self.callback(name, rssi)
+                            # P1 fix (Concurrency): wrap callback in try/except
+                            try:
+                                name = device.name or "Unknown"
+                                rssi = device.rssi
+                                
+                                # Anonymize device name if enabled
+                                if self._anonymizer:
+                                    name = self._anonymizer.anonymize(name)
+                                
+                                if rssi is not None:
+                                    self.callback(name, rssi)
+                            except Exception as e:
+                                logger.error(f"Bluetooth callback error: {e}")
                     except Exception as e:
                         logger.warning(f"Bluetooth scan error: {e}")
                     
@@ -457,18 +473,28 @@ class BluetoothMonitor:
     def stop(self):
         """Stop Bluetooth monitoring with proper resource cleanup."""
         self.running = False
-        if self.loop:
-            self.loop.call_soon_threadsafe(self.loop.stop)
+        
+        # P0 fix (Concurrency): capture local reference to avoid race condition
+        loop_ref = self.loop
+        if loop_ref:
+            try:
+                loop_ref.call_soon_threadsafe(loop_ref.stop)
+            except RuntimeError:
+                pass  # Already closed
+        
         if self.thread:
             self.thread.join(timeout=5)
+            if self.thread.is_alive():
+                logger.warning("Bluetooth thread did not terminate in time")
             self.thread = None
+        
         # P0 fix: properly close asyncio event loop to prevent resource leak
-        if self.loop:
+        if loop_ref:
             try:
-                self.loop.close()
-            except:
+                loop_ref.close()
+            except Exception:
                 pass
-            self.loop = None
+        self.loop = None
         logger.info("Bluetooth monitoring stopped")
     
     def get_error(self) -> Optional[str]:
