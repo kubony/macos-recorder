@@ -13,8 +13,18 @@ audio:
 bluetooth:
   enabled: true
   scan_interval: 1.0  # seconds
-  target_devices: []  # empty = all devices, or list specific device names
+  target_devices: []  # empty = all devices
+  anonymize: true  # Privacy: hash device names
 
 output:
   directory: ~/Recordings
   format: mp4
+
+privacy:
+  require_consent: true  # Show consent dialog on first run
+  auto_delete_days: 30   # Auto-delete recordings after N days (0 = disabled)
+  anonymize_bluetooth: true
+
+security:
+  file_permissions: "600"      # Files: owner read/write only
+  directory_permissions: "700"  # Dirs: owner full access only

@@ -22,3 +22,12 @@ PyYAML>=6.0
 
 # Utilities
 click>=8.1.0
+
+# macOS native APIs (optional, for better integration)
+pyobjc-framework-Quartz>=9.0
+pyobjc-framework-AVFoundation>=9.0
+pyobjc-framework-CoreBluetooth>=9.0
+
+# Security (optional, for encryption)
+cryptography>=41.0.0
+keyring>=24.0.0

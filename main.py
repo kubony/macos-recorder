@@ -2,6 +2,14 @@
 """
 macOS Recorder - Menu bar app for recording screen, audio, mic, and Bluetooth RSSI.
 Inspired by ocap from the D2E project.
+
+Improvements based on expert review:
+- Permission checking and onboarding
+- Config file loading
+- Recording options toggle
+- Status feedback (icon animation, sounds, duration)
+- Consent mechanism
+- Secure file handling
 """
 
 import rumps
@@ -13,7 +21,56 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
-from recorder import ScreenRecorder, AudioRecorder, BluetoothMonitor, SleepInhibitor
+from recorder import (
+    ScreenRecorder, AudioRecorder, BluetoothMonitor, SleepInhibitor,
+    PermissionChecker, load_config, secure_directory, secure_file, play_sound
+)
+
+
+class ConsentManager:
+    """Manages user consent for data collection (GDPR compliance)."""
+    
+    CONSENT_FILE = Path.home() / ".macos-recorder" / "consent.json"
+    CONSENT_VERSION = "1.0"
+    
+    def __init__(self):
+        self.CONSENT_FILE.parent.mkdir(exist_ok=True)
+    
+    def has_consent(self) -> bool:
+        """Check if user has given consent."""
+        if not self.CONSENT_FILE.exists():
+            return False
+        try:
+            data = json.loads(self.CONSENT_FILE.read_text())
+            return data.get("granted", False) and data.get("version") == self.CONSENT_VERSION
+        except:
+            return False
+    
+    def request_consent(self) -> bool:
+        """Show consent dialog and save response."""
+        response = rumps.alert(
+            title="📹 개인정보 수집 동의",
+            message=(
+                "macOS Recorder는 다음 정보를 수집합니다:\n\n"
+                "• 화면 녹화 (모든 화면 내용)\n"
+                "• 시스템 오디오 및 마이크\n"
+                "• 블루투스 기기 신호 강도 (익명화됨)\n\n"
+                "수집된 데이터는 로컬에만 저장되며,\n"
+                "언제든지 삭제할 수 있습니다.\n\n"
+                "동의하시겠습니까?"
+            ),
+            ok="동의",
+            cancel="거부"
+        )
+        
+        consent_data = {
+            "granted": response == 1,
+            "version": self.CONSENT_VERSION,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        self.CONSENT_FILE.write_text(json.dumps(consent_data, indent=2))
+        return response == 1
 
 
 class RecorderApp(rumps.App):
@@ -22,14 +79,29 @@ class RecorderApp(rumps.App):
     def __init__(self):
         super().__init__(
             name="macOS Recorder",
-            icon="🔴",
-            quit_button=None  # Custom quit handling
+            icon=None,
+            title="⚫",
+            quit_button=None
         )
         
         self.recording = False
         self.start_time = None
-        self.output_dir = Path.home() / "Recordings"
+        
+        # Load config
+        self.config = load_config()
+        self.output_dir = Path(self.config["output"]["directory"]).expanduser()
         self.output_dir.mkdir(exist_ok=True)
+        secure_directory(self.output_dir)
+        
+        # Recording settings (toggleable)
+        self.settings = {
+            "record_screen": True,
+            "record_audio": self.config["audio"]["system_audio"],
+            "record_mic": self.config["audio"]["microphone"],
+            "record_bluetooth": self.config["bluetooth"]["enabled"],
+            "fps": self.config["recording"]["fps"],
+            "anonymize_bluetooth": self.config["bluetooth"].get("anonymize", True),
+        }
         
         # Recording components
         self.screen_recorder = None
@@ -39,55 +111,149 @@ class RecorderApp(rumps.App):
         self.sleep_inhibitor = None
         
         # Event log
-        self.events = []
         self.event_file = None
+        self.session_dir = None
         
-        # Settings
-        self.settings = {
-            "fps": 30,
-            "record_screen": True,
-            "record_audio": True,
-            "record_mic": True,
-            "record_bluetooth": True,
-        }
+        # Consent manager
+        self.consent_manager = ConsentManager()
         
-        # Build menu
-        self.menu = [
-            rumps.MenuItem("Start Recording", callback=self.toggle_recording, key="r"),
-            None,  # Separator
-            rumps.MenuItem("Status: Idle"),
-            rumps.MenuItem("Duration: --:--"),
-            None,  # Separator
-            rumps.MenuItem("Settings", callback=self.open_settings),
-            rumps.MenuItem("Open Recordings Folder", callback=self.open_recordings),
-            None,  # Separator
-            rumps.MenuItem("Quit", callback=self.quit_app, key="q"),
-        ]
+        # Build menu with toggles
+        self._build_menu()
         
         # Timer for updating duration
-        self.timer = rumps.Timer(self.update_duration, 1)
+        self.duration_timer = rumps.Timer(self._update_duration, 1)
+        
+        # Check permissions and consent on startup
+        self._check_startup_requirements()
+    
+    def _build_menu(self):
+        """Build the menu with toggle options."""
+        self.start_item = rumps.MenuItem("▶️ Start Recording", callback=self.toggle_recording, key="r")
+        
+        # Recording option toggles
+        self.screen_toggle = rumps.MenuItem("📺 Screen", callback=self._toggle_screen)
+        self.screen_toggle.state = self.settings["record_screen"]
+        
+        self.audio_toggle = rumps.MenuItem("🔊 System Audio", callback=self._toggle_audio)
+        self.audio_toggle.state = self.settings["record_audio"]
+        
+        self.mic_toggle = rumps.MenuItem("🎤 Microphone", callback=self._toggle_mic)
+        self.mic_toggle.state = self.settings["record_mic"]
+        
+        self.bt_toggle = rumps.MenuItem("📶 Bluetooth", callback=self._toggle_bluetooth)
+        self.bt_toggle.state = self.settings["record_bluetooth"]
+        
+        # Status items
+        self.status_item = rumps.MenuItem("Status: Idle")
+        self.duration_item = rumps.MenuItem("Duration: --:--")
+        self.size_item = rumps.MenuItem("Size: --")
+        
+        self.menu = [
+            self.start_item,
+            None,  # Separator
+            "Recording Options:",
+            self.screen_toggle,
+            self.audio_toggle,
+            self.mic_toggle,
+            self.bt_toggle,
+            None,
+            self.status_item,
+            self.duration_item,
+            self.size_item,
+            None,
+            rumps.MenuItem("📁 Open Recordings", callback=self.open_recordings),
+            rumps.MenuItem("⚙️ Settings", callback=self.open_settings),
+            rumps.MenuItem("❓ About", callback=self.show_about),
+            None,
+            rumps.MenuItem("Quit", callback=self.quit_app, key="q"),
+        ]
+    
+    def _toggle_screen(self, sender):
+        if not self.recording:
+            self.settings["record_screen"] = not self.settings["record_screen"]
+            sender.state = self.settings["record_screen"]
+    
+    def _toggle_audio(self, sender):
+        if not self.recording:
+            self.settings["record_audio"] = not self.settings["record_audio"]
+            sender.state = self.settings["record_audio"]
+    
+    def _toggle_mic(self, sender):
+        if not self.recording:
+            self.settings["record_mic"] = not self.settings["record_mic"]
+            sender.state = self.settings["record_mic"]
+    
+    def _toggle_bluetooth(self, sender):
+        if not self.recording:
+            self.settings["record_bluetooth"] = not self.settings["record_bluetooth"]
+            sender.state = self.settings["record_bluetooth"]
+    
+    def _check_startup_requirements(self):
+        """Check permissions and consent on startup."""
+        # Check consent
+        if self.config["privacy"].get("require_consent", True):
+            if not self.consent_manager.has_consent():
+                if not self.consent_manager.request_consent():
+                    rumps.notification(
+                        title="macOS Recorder",
+                        subtitle="",
+                        message="동의가 필요합니다. 앱을 다시 시작하세요."
+                    )
+        
+        # Check permissions
+        permissions = PermissionChecker.validate_all()
+        missing = [k for k, v in permissions.items() if not v]
+        
+        if missing:
+            self._show_permission_alert(missing)
+    
+    def _show_permission_alert(self, missing: list):
+        """Show alert for missing permissions."""
+        response = rumps.alert(
+            title="🔐 권한 필요",
+            message=(
+                f"다음 권한이 필요합니다:\n\n"
+                f"• {', '.join(missing)}\n\n"
+                "시스템 환경설정을 열까요?"
+            ),
+            ok="설정 열기",
+            cancel="나중에"
+        )
+        
+        if response == 1:
+            PermissionChecker.open_privacy_settings()
     
     def toggle_recording(self, sender):
         """Start or stop recording."""
         if not self.recording:
             self.start_recording()
-            sender.title = "Stop Recording"
-            self.icon = "🔴"  # Recording indicator
         else:
             self.stop_recording()
-            sender.title = "Start Recording"
-            self.icon = "⚫"  # Idle indicator
     
     def start_recording(self):
         """Initialize and start all recording components."""
+        # Validate at least one recording option
+        if not any([
+            self.settings["record_screen"],
+            self.settings["record_audio"],
+            self.settings["record_mic"],
+            self.settings["record_bluetooth"]
+        ]):
+            rumps.notification(
+                title="macOS Recorder",
+                subtitle="",
+                message="최소 하나의 녹화 옵션을 선택하세요."
+            )
+            return
+        
         self.recording = True
         self.start_time = time.time()
-        self.events = []
         
         # Create session directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.session_dir = self.output_dir / f"recording_{timestamp}"
         self.session_dir.mkdir(exist_ok=True)
+        secure_directory(self.session_dir)
         
         # Open event log
         self.event_file = open(self.session_dir / "events.jsonl", "w")
@@ -96,13 +262,19 @@ class RecorderApp(rumps.App):
         self.sleep_inhibitor = SleepInhibitor()
         self.sleep_inhibitor.start()
         
+        # Play start sound
+        play_sound("Blow")
+        
+        errors = []
+        
         # Start screen recording
         if self.settings["record_screen"]:
             self.screen_recorder = ScreenRecorder(
                 output_path=self.session_dir / "screen.mp4",
                 fps=self.settings["fps"]
             )
-            self.screen_recorder.start()
+            if not self.screen_recorder.start():
+                errors.append(f"Screen: {self.screen_recorder.get_error()}")
         
         # Start audio recording (system audio)
         if self.settings["record_audio"]:
@@ -123,27 +295,46 @@ class RecorderApp(rumps.App):
         # Start Bluetooth monitoring
         if self.settings["record_bluetooth"]:
             self.bluetooth_monitor = BluetoothMonitor(
-                callback=self.on_bluetooth_event
+                callback=self._on_bluetooth_event,
+                anonymize=self.settings["anonymize_bluetooth"]
             )
             self.bluetooth_monitor.start()
         
-        # Update status
-        self.menu["Status: Idle"].title = "Status: Recording..."
-        self.timer.start()
+        # Log recording start
+        self._log_event("recording", {
+            "action": "start",
+            "options": {k: v for k, v in self.settings.items()}
+        })
         
-        self.log_event("recording", {"action": "start"})
+        # Update UI
+        self.start_item.title = "⏹️ Stop Recording"
+        self.title = "🔴"
+        self.status_item.title = "Status: Recording..."
+        self.duration_timer.start()
+        
+        # Disable toggles during recording
+        self.screen_toggle.set_callback(None)
+        self.audio_toggle.set_callback(None)
+        self.mic_toggle.set_callback(None)
+        self.bt_toggle.set_callback(None)
+        
+        # Show notification
+        message = f"저장 위치: {self.session_dir.name}"
+        if errors:
+            message += f"\n⚠️ 오류: {'; '.join(errors)}"
+        
         rumps.notification(
-            title="Recording Started",
+            title="🔴 녹화 시작",
             subtitle="",
-            message=f"Saving to {self.session_dir.name}"
+            message=message
         )
     
     def stop_recording(self):
         """Stop all recording components and save files."""
         self.recording = False
-        self.timer.stop()
+        self.duration_timer.stop()
         
-        self.log_event("recording", {"action": "stop"})
+        self._log_event("recording", {"action": "stop"})
         
         # Stop all components
         if self.screen_recorder:
@@ -169,65 +360,119 @@ class RecorderApp(rumps.App):
         # Close event log
         if self.event_file:
             self.event_file.close()
+            secure_file(self.session_dir / "events.jsonl")
             self.event_file = None
         
-        # Update status
-        self.menu["Status: Recording..."].title = "Status: Idle"
-        self.menu["Duration: --:--"].title = "Duration: --:--"
+        # Play stop sound
+        play_sound("Glass")
+        
+        # Calculate total size
+        total_size = sum(
+            f.stat().st_size for f in self.session_dir.iterdir() if f.is_file()
+        ) if self.session_dir else 0
+        size_mb = total_size / (1024 * 1024)
+        
+        # Update UI
+        self.start_item.title = "▶️ Start Recording"
+        self.title = "⚫"
+        self.status_item.title = "Status: Idle"
+        self.duration_item.title = "Duration: --:--"
+        self.size_item.title = "Size: --"
+        
+        # Re-enable toggles
+        self.screen_toggle.set_callback(self._toggle_screen)
+        self.audio_toggle.set_callback(self._toggle_audio)
+        self.mic_toggle.set_callback(self._toggle_mic)
+        self.bt_toggle.set_callback(self._toggle_bluetooth)
         
         rumps.notification(
-            title="Recording Stopped",
+            title="⏹️ 녹화 완료",
             subtitle="",
-            message=f"Saved to {self.session_dir.name}"
+            message=f"{self.session_dir.name}\n크기: {size_mb:.1f} MB"
         )
     
-    def log_event(self, event_type: str, data: dict):
+    def _log_event(self, event_type: str, data: dict):
         """Log an event with timestamp."""
-        event = {
-            "ts": time.time_ns(),
-            "type": event_type,
-            **data
-        }
         if self.event_file:
+            event = {
+                "ts": time.time_ns(),
+                "type": event_type,
+                **data
+            }
             self.event_file.write(json.dumps(event) + "\n")
             self.event_file.flush()
     
-    def on_bluetooth_event(self, device_name: str, rssi: int):
+    def _on_bluetooth_event(self, device_name: str, rssi: int):
         """Callback for Bluetooth RSSI updates."""
-        self.log_event("bluetooth", {
+        self._log_event("bluetooth", {
             "device": device_name,
             "rssi": rssi
         })
     
-    def update_duration(self, sender):
-        """Update the duration display."""
+    def _update_duration(self, sender):
+        """Update the duration and size display."""
         if self.recording and self.start_time:
             elapsed = int(time.time() - self.start_time)
-            minutes, seconds = divmod(elapsed, 60)
-            hours, minutes = divmod(minutes, 60)
+            mins, secs = divmod(elapsed, 60)
+            hours, mins = divmod(mins, 60)
+            
             if hours > 0:
-                duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+                duration_str = f"{hours:02d}:{mins:02d}:{secs:02d}"
             else:
-                duration_str = f"{minutes:02d}:{seconds:02d}"
-            self.menu["Duration: --:--"].title = f"Duration: {duration_str}"
+                duration_str = f"{mins:02d}:{secs:02d}"
+            
+            self.duration_item.title = f"Duration: {duration_str}"
+            self.title = f"🔴 {mins:02d}:{secs:02d}"
+            
+            # Update size
+            if self.session_dir and self.session_dir.exists():
+                total_size = sum(
+                    f.stat().st_size for f in self.session_dir.iterdir() if f.is_file()
+                )
+                size_mb = total_size / (1024 * 1024)
+                self.size_item.title = f"Size: {size_mb:.1f} MB"
     
     def open_settings(self, sender):
-        """Open settings dialog."""
-        # For now, just show a notification
-        rumps.notification(
-            title="Settings",
-            subtitle="",
-            message="Edit config.yaml to change settings"
-        )
+        """Open config file for editing."""
+        config_path = Path(__file__).parent / "config.yaml"
+        if config_path.exists():
+            subprocess.run(["open", str(config_path)])
+        else:
+            rumps.notification(
+                title="Settings",
+                subtitle="",
+                message="config.yaml 파일이 없습니다."
+            )
     
     def open_recordings(self, sender):
         """Open the recordings folder in Finder."""
         subprocess.run(["open", str(self.output_dir)])
     
+    def show_about(self, sender):
+        """Show about dialog."""
+        rumps.alert(
+            title="macOS Recorder",
+            message=(
+                "Version 1.1.0\n\n"
+                "화면, 오디오, 마이크, 블루투스 신호를 녹화합니다.\n\n"
+                "Inspired by ocap from the D2E project.\n"
+                "https://github.com/kubony/macos-recorder"
+            )
+        )
+    
     def quit_app(self, sender):
         """Clean up and quit the application."""
         if self.recording:
+            response = rumps.alert(
+                title="녹화 중",
+                message="녹화 중입니다. 정말 종료하시겠습니까?",
+                ok="종료",
+                cancel="취소"
+            )
+            if response != 1:
+                return
             self.stop_recording()
+        
         rumps.quit_application()
 
 
