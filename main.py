@@ -29,6 +29,7 @@ from recorder import (
     ScreenRecorder, AudioRecorder, BluetoothMonitor, SleepInhibitor,
     PermissionChecker, load_config, secure_directory, secure_file, play_sound
 )
+from version import __version__
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -659,7 +660,7 @@ class RecorderApp(rumps.App):
         rumps.alert(
             title="macOS Recorder",
             message=(
-                "Version 1.1.0\n\n"
+                f"Version {__version__}\n\n"
                 "화면, 오디오, 마이크, 블루투스 신호를 녹화합니다.\n\n"
                 "Inspired by ocap from the D2E project.\n"
                 "https://github.com/kubony/macos-recorder"

@@ -18,11 +18,31 @@ Inspired by [ocap](https://github.com/open-world-agents/ocap) from the D2E proje
 
 - macOS 12.0+ (Monterey or later)
 - Python 3.10+
+- ffmpeg (for screen recording)
+- BlackHole (for system audio capture)
 - Screen Recording permission
 - Microphone permission
 - Bluetooth permission
 
 ## Installation
+
+### 1. Install System Dependencies
+
+```bash
+# Install ffmpeg (required for screen recording)
+brew install ffmpeg
+
+# Install BlackHole (required for system audio capture)
+brew install blackhole-2ch
+```
+
+After installing BlackHole, configure it in **Audio MIDI Setup**:
+1. Open "Audio MIDI Setup" (in /Applications/Utilities/)
+2. Click "+" → "Create Multi-Output Device"
+3. Check both your speakers and "BlackHole 2ch"
+4. Set this Multi-Output Device as your system output
+
+### 2. Install Python Dependencies
 
 ```bash
 # Clone the repository
@@ -36,6 +56,18 @@ source .venv/bin/activate
 # Install dependencies
 pip install -r requirements.txt
 ```
+
+### Dependencies
+
+The following Python packages are required:
+- `rumps>=0.4.0` - Menu bar app framework
+- `sounddevice>=0.4.6` - Audio recording
+- `soundfile>=0.12.1` - Audio file I/O
+- `numpy>=1.24.0` - Numerical operations
+- `bleak>=0.21.0` - Bluetooth Low Energy
+- `PyYAML>=6.0` - Configuration parsing
+- `click>=8.1.0` - CLI framework
+- `pyobjc-framework-Quartz>=9.0` - macOS permissions
 
 ## Usage
 
@@ -121,6 +153,28 @@ Events are logged in JSON Lines format with nanosecond timestamps:
 {"ts": 1708588800000000000, "type": "bluetooth", "device": "AirPods Pro", "rssi": -45}
 {"ts": 1708588801000000000, "type": "bluetooth", "device": "AirPods Pro", "rssi": -47}
 ```
+
+## Troubleshooting
+
+### ffmpeg not found
+```bash
+brew install ffmpeg
+```
+
+### BlackHole not found (System Audio not working)
+```bash
+brew install blackhole-2ch
+```
+After installation, configure Multi-Output Device in Audio MIDI Setup.
+
+### Permission Errors
+Go to System Preferences → Privacy & Security and grant the required permissions:
+- Screen Recording
+- Microphone
+- Bluetooth
+
+### Recording starts but no audio
+Make sure BlackHole is properly configured as a Multi-Output Device and selected as your system output.
 
 ## License
 
