@@ -90,3 +90,82 @@ class TestDeviceRegistry:
         assert reg.devices["Inkeun의 iPhone"]["owner"] == "서인근"
         assert "WH-CH720N" in reg.ambient
         assert "서인근" in reg.people
+
+
+class TestBLEParser:
+    """Tests for BLE event parsing from events.jsonl."""
+
+    def test_parse_ble_events(self, tmp_path):
+        from ble_identify import parse_ble_events
+        events_file = tmp_path / "events.jsonl"
+        events_file.write_text("\n".join([
+            json.dumps({"ts": 1000, "type": "recording", "action": "start"}),
+            json.dumps({"ts": 1001, "type": "bluetooth", "name": "Device A", "rssi": -50, "address": "AA:BB"}),
+            json.dumps({"ts": 1002, "type": "bluetooth", "name": "Unknown", "rssi": -60, "address": "CC:DD"}),
+            json.dumps({"ts": 1003, "type": "bluetooth", "name": "Device A", "rssi": -55, "address": "AA:BB"}),
+            json.dumps({"ts": 1004, "type": "context", "wifi": {}}),
+            json.dumps({"ts": 1005, "type": "bluetooth", "name": "Device B", "rssi": -70, "address": "EE:FF"}),
+        ]))
+        result = parse_ble_events(events_file)
+        assert "Device A" in result
+        assert "Device B" in result
+        assert "Unknown" not in result
+        assert len(result["Device A"]["rssi_values"]) == 2
+        assert result["Device A"]["rssi_values"] == [-50, -55]
+
+    def test_parse_session_timestamps(self, tmp_path):
+        from ble_identify import parse_ble_events
+        events_file = tmp_path / "events.jsonl"
+        events_file.write_text("\n".join([
+            json.dumps({"ts": 1000000000000, "type": "recording", "action": "start"}),
+            json.dumps({"ts": 1001000000000, "type": "bluetooth", "name": "Dev", "rssi": -50, "address": "AA"}),
+            json.dumps({"ts": 1060000000000, "type": "bluetooth", "name": "Dev", "rssi": -50, "address": "AA"}),
+            json.dumps({"ts": 1120000000000, "type": "recording", "action": "stop"}),
+        ]))
+        result = parse_ble_events(events_file)
+        assert result["Dev"]["first_seen_ts"] == 1001000000000
+        assert result["Dev"]["last_seen_ts"] == 1060000000000
+
+
+class TestAttendanceAnalysis:
+    """Tests for attendance determination logic."""
+
+    def test_strong_signal_device_is_present(self):
+        from ble_identify import analyze_attendance
+        devices = {
+            "Strong Device": {
+                "rssi_values": [-50, -55, -52, -48, -53] * 20,
+                "first_seen_ts": 1000000000000,
+                "last_seen_ts": 1000000000000 + 600 * 1_000_000_000,
+                "scan_count": 100,
+            }
+        }
+        result = analyze_attendance(devices, 600)
+        assert "Strong Device" in result
+        assert result["Strong Device"]["present"] is True
+
+    def test_weak_signal_device_not_present(self):
+        from ble_identify import analyze_attendance
+        devices = {
+            "Weak Device": {
+                "rssi_values": [-85, -90, -88],
+                "first_seen_ts": 1000000000000,
+                "last_seen_ts": 1000000000000 + 600 * 1_000_000_000,
+                "scan_count": 3,
+            }
+        }
+        result = analyze_attendance(devices, 600)
+        assert result["Weak Device"]["present"] is False
+
+    def test_brief_device_not_present(self):
+        from ble_identify import analyze_attendance
+        devices = {
+            "Brief Device": {
+                "rssi_values": [-50, -52],
+                "first_seen_ts": 1000000000000,
+                "last_seen_ts": 1000000000000 + 60 * 1_000_000_000,
+                "scan_count": 2,
+            }
+        }
+        result = analyze_attendance(devices, 600)
+        assert result["Brief Device"]["present"] is False

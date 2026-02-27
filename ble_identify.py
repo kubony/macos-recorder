@@ -110,3 +110,69 @@ class DeviceRegistry:
 
         self._build_alias_index()
         self.save()
+
+
+def parse_ble_events(events_file: Path) -> dict:
+    """Parse events.jsonl and group BLE events by device name.
+    Returns dict: device_name -> {rssi_values, first_seen_ts, last_seen_ts, scan_count}
+    Skips devices named 'Unknown'.
+    """
+    devices = {}
+    with open(events_file) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            event = json.loads(line)
+            if event.get("type") != "bluetooth":
+                continue
+            name = event.get("name", "Unknown")
+            if name == "Unknown":
+                continue
+            rssi = event.get("rssi")
+            ts = event.get("ts", 0)
+            if rssi is None:
+                continue
+            if name not in devices:
+                devices[name] = {
+                    "rssi_values": [],
+                    "first_seen_ts": ts,
+                    "last_seen_ts": ts,
+                    "scan_count": 0,
+                }
+            devices[name]["rssi_values"].append(rssi)
+            devices[name]["last_seen_ts"] = max(devices[name]["last_seen_ts"], ts)
+            devices[name]["first_seen_ts"] = min(devices[name]["first_seen_ts"], ts)
+            devices[name]["scan_count"] += 1
+    return devices
+
+
+RSSI_THRESHOLD = -70
+MIN_DURATION_S = 120
+MIN_DETECTION_RATIO = 0.6
+
+
+def analyze_attendance(devices: dict, session_duration_s: float) -> dict:
+    """Determine which devices were physically present.
+    Returns dict: device_name -> {present, median_rssi, duration_s, detection_ratio}
+    """
+    expected_scans = max(session_duration_s / 5, 1)
+    result = {}
+    for name, info in devices.items():
+        rssi_vals = info["rssi_values"]
+        med_rssi = median(rssi_vals) if rssi_vals else -100
+        duration_ns = info["last_seen_ts"] - info["first_seen_ts"]
+        duration_s = duration_ns / 1_000_000_000
+        detection_ratio = info["scan_count"] / expected_scans
+        present = (
+            med_rssi > RSSI_THRESHOLD
+            and duration_s > MIN_DURATION_S
+            and detection_ratio > MIN_DETECTION_RATIO
+        )
+        result[name] = {
+            "present": present,
+            "median_rssi": round(med_rssi, 1),
+            "duration_s": round(duration_s, 1),
+            "detection_ratio": round(detection_ratio, 2),
+        }
+    return result
