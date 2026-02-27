@@ -127,6 +127,8 @@ def parse_ble_events(events_file: Path) -> dict:
             if event.get("type") != "bluetooth":
                 continue
             name = event.get("name", "Unknown")
+            # Normalize non-breaking spaces from BLE device names
+            name = name.replace("\xa0", " ")
             if name == "Unknown":
                 continue
             rssi = event.get("rssi")
