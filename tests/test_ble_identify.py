@@ -169,3 +169,124 @@ class TestAttendanceAnalysis:
         }
         result = analyze_attendance(devices, 600)
         assert result["Brief Device"]["present"] is False
+
+
+class TestAnalyzePipeline:
+    """Tests for the full analyze pipeline (non-interactive)."""
+
+    def _make_session(self, tmp_path, devices_data):
+        session = tmp_path / "recording_20260227_100000"
+        session.mkdir()
+        lines = []
+        lines.append(json.dumps({"ts": 1000000000000, "type": "recording", "action": "start"}))
+        for dev_name, rssi, count in devices_data:
+            for i in range(count):
+                ts = 1000000000000 + (i * 3_000_000_000)
+                lines.append(json.dumps({
+                    "ts": ts, "type": "bluetooth",
+                    "name": dev_name, "rssi": rssi, "address": f"ADDR-{dev_name}",
+                }))
+        lines.append(json.dumps({"ts": 1000000000000 + 600_000_000_000, "type": "recording", "action": "stop"}))
+        (session / "events.jsonl").write_text("\n".join(lines))
+        return session
+
+    def test_analyze_with_known_device(self, tmp_path):
+        from ble_identify import DeviceRegistry, cmd_analyze
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        reg = DeviceRegistry(config_dir=config_dir)
+        reg.devices["Inkeun의 iPhone"] = {
+            "owner": "서인근", "confidence": "certain",
+            "aliases": [], "first_seen": "2026-02-23", "session_count": 5,
+        }
+        reg.people["서인근"] = {"affiliation": "마음AI WoRV", "devices": ["Inkeun의 iPhone"]}
+        reg.ambient = ["WH-CH720N"]
+        reg.save()
+
+        session = self._make_session(tmp_path, [
+            ("Inkeun의 iPhone", -45, 100),
+            ("WH-CH720N", -60, 100),
+            ("New Device", -55, 100),
+        ])
+
+        result = cmd_analyze(session, config_dir=config_dir, interactive=False)
+        names = [p["name"] for p in result["participants"]]
+        assert "서인근" in names
+        for p in result["participants"]:
+            assert p["name"] != "WH-CH720N"
+        candidate_devices = [c["device_name"] for c in result["candidates"]]
+        assert "New Device" in candidate_devices
+
+    def test_analyze_saves_participants_json(self, tmp_path):
+        from ble_identify import DeviceRegistry, cmd_analyze
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        reg = DeviceRegistry(config_dir=config_dir)
+        reg.devices["Inkeun의 iPhone"] = {
+            "owner": "서인근", "confidence": "certain",
+            "aliases": [], "first_seen": "2026-02-23", "session_count": 5,
+        }
+        reg.people["서인근"] = {"affiliation": "마음AI WoRV", "devices": ["Inkeun의 iPhone"]}
+        reg.save()
+
+        session = self._make_session(tmp_path, [("Inkeun의 iPhone", -45, 100)])
+        cmd_analyze(session, config_dir=config_dir, interactive=False, save=True)
+        pfile = session / "participants.json"
+        assert pfile.exists()
+        data = json.loads(pfile.read_text())
+        assert data["participants"][0]["name"] == "서인근"
+        assert data["participants"][0]["source"] == "ble"
+
+
+class TestCRUD:
+    """Tests for list/add/remove/edit commands."""
+
+    def _make_session_with_participants(self, tmp_path):
+        session = tmp_path / "recording_test"
+        session.mkdir()
+        (session / "participants.json").write_text(json.dumps({
+            "meeting_title": "Test Meeting",
+            "participants": [
+                {"name": "서인근", "affiliation": "마음AI WoRV", "source": "ble"},
+                {"name": "김다혜", "affiliation": "마음AI WoRV", "source": "confirmed"},
+            ]
+        }, ensure_ascii=False))
+        return session
+
+    def test_cmd_list(self, tmp_path):
+        from ble_identify import cmd_list
+        session = self._make_session_with_participants(tmp_path)
+        result = cmd_list(session)
+        assert len(result) == 2
+        assert result[0]["name"] == "서인근"
+
+    def test_cmd_add(self, tmp_path):
+        from ble_identify import cmd_add, cmd_list
+        session = self._make_session_with_participants(tmp_path)
+        cmd_add(session, "박유빈", affiliation="마음AI WoRV 2본부")
+        result = cmd_list(session)
+        assert len(result) == 3
+        assert any(p["name"] == "박유빈" for p in result)
+
+    def test_cmd_add_duplicate(self, tmp_path):
+        from ble_identify import cmd_add, cmd_list
+        session = self._make_session_with_participants(tmp_path)
+        cmd_add(session, "서인근", affiliation="마음AI")
+        result = cmd_list(session)
+        assert len(result) == 2
+
+    def test_cmd_remove(self, tmp_path):
+        from ble_identify import cmd_remove, cmd_list
+        session = self._make_session_with_participants(tmp_path)
+        cmd_remove(session, "김다혜")
+        result = cmd_list(session)
+        assert len(result) == 1
+        assert result[0]["name"] == "서인근"
+
+    def test_cmd_edit(self, tmp_path):
+        from ble_identify import cmd_edit, cmd_list
+        session = self._make_session_with_participants(tmp_path)
+        cmd_edit(session, "김다혜", new_name="김다혜(DH)", affiliation="WoRV 개발팀")
+        result = cmd_list(session)
+        dh = next(p for p in result if p["name"] == "김다혜(DH)")
+        assert dh["affiliation"] == "WoRV 개발팀"
