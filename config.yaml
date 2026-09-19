@@ -1,30 +1,46 @@
-# macOS Recorder Configuration
-
-recording:
-  fps: 30
-  quality: high  # low, medium, high
-  include_cursor: true
-
 audio:
-  system_audio: true
+  mic_device: MacBook Pro 마이크
   microphone: true
   sample_rate: 44100
-
+  system_audio: true
+  system_device: null
 bluetooth:
+  anonymize: false
   enabled: true
-  scan_interval: 1.0  # seconds
-  target_devices: []  # empty = all devices
-  anonymize: true  # Privacy: hash device names
-
+  rssi_threshold: -70
+  scan_interval: 1.0
+  target_devices: []
+context:
+  enabled: true
+  poll_interval: 10.0
+gps:
+  enabled: true
+  poll_interval: 60.0
+labeling:
+  auto_suggest_location: true
+  enabled: true
 output:
   directory: ~/Recordings
   format: mp4
-
+overlay:
+  enabled: true
+  max_devices: 15
+  opacity: 0.77
+  refresh_interval: 2.0
+  rssi_threshold: -70
+  show_unmapped: true
+post_processing:
+  command: claude "/rec-processor {path}"
+  enabled: false
 privacy:
-  require_consent: true  # Show consent dialog on first run
-  auto_delete_days: 30   # Auto-delete recordings after N days (0 = disabled)
-  anonymize_bluetooth: true
-
+  anonymize_bluetooth: false
+  auto_delete_days: 30
+  require_consent: true
+recording:
+  camera: true
+  fps: 30
+  include_cursor: true
+  quality: high
 security:
-  file_permissions: "600"      # Files: owner read/write only
-  directory_permissions: "700"  # Dirs: owner full access only
+  directory_permissions: '700'
+  file_permissions: '600'
